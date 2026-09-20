@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .compare import compare_rounds
 from .conflict import minimum_tie_resolution, shortest_cycle
 from .paths import pair_explanation
 from .priority import recommend_next_pair
@@ -870,6 +871,78 @@ def apply_sandbox(sid: str, payload: SandboxApply | None = None):
                     )
             conn.execute("DELETE FROM sandboxes WHERE session_id = ?", (sid,))
             return load_state(conn, sid)
+    finally:
+        conn.close()
+
+
+# ---------- 会话对照报告 ----------
+
+def _load_round(
+    conn: sqlite3.Connection, sid: str
+) -> tuple[list[str], list[dict]]:
+    """读取一个会话的启用候选（录入序）与其启用候选间的判断记录。"""
+    all_candidates, disabled_set, all_history = _load_rows(conn, sid)
+    candidates = [name for name in all_candidates if name not in disabled_set]
+    enabled = set(candidates)
+    history = [
+        h for h in all_history if h["a"] in enabled and h["b"] in enabled
+    ]
+    return candidates, history
+
+
+@app.get("/api/sessions/{sid}/comparison")
+def compare_sessions(sid: str, other_id: str):
+    """会话对照报告：与另一轮已完成评审逐组合对照并计算 Kendall τ-b。
+
+    仅允许比较**启用候选名称集合相同**且两轮均已完成全部启用候选对评审
+    的会话（候选录入顺序可以不同；停用候选不参与）。纯只读：不修改任一
+    会话的任何数据。判断在后端按名称排序归一化为无向组合与绝对胜者，
+    分类为结果不变 / 胜者反转 / 胜负变平局 / 平局变胜负；τ-b 基于两轮
+    最终 Schulze 排名的全部候选对计算（含并列修正），分母为零时返回 null。
+    """
+    conn = get_conn()
+    try:
+        if sid == other_id:
+            raise HTTPException(422, "请输入另一个会话 ID（不能与当前会话相同）")
+        if conn.execute(
+            "SELECT 1 FROM sessions WHERE id = ?", (sid,)
+        ).fetchone() is None:
+            raise HTTPException(404, "当前会话不存在或已被删除")
+        if conn.execute(
+            "SELECT 1 FROM sessions WHERE id = ?", (other_id,)
+        ).fetchone() is None:
+            raise HTTPException(404, "另一会话不存在或已被删除")
+
+        candidates_a, history_a = _load_round(conn, sid)
+        candidates_b, history_b = _load_round(conn, other_id)
+        if set(candidates_a) != set(candidates_b):
+            raise HTTPException(
+                422,
+                "两个会话的启用候选名称集合不同，无法对照"
+                "（仅停用候选不同也需先恢复一致）",
+            )
+
+        expected = len(candidates_a) * (len(candidates_a) - 1) // 2
+        # 正常数据下同组合只有一条判断记录；以集合判完成度更稳妥
+        pairs_a = {(h["a"], h["b"]) for h in history_a}
+        pairs_b = {(h["a"], h["b"]) for h in history_b}
+        incomplete = []
+        if len(pairs_a) < expected:
+            incomplete.append("当前会话")
+        if len(pairs_b) < expected:
+            incomplete.append("另一会话")
+        if incomplete:
+            raise HTTPException(
+                409,
+                f"{'、'.join(incomplete)}尚有组合未评审，仅已完成的两轮评审可对照",
+            )
+
+        report = compare_rounds(candidates_a, history_a, candidates_b, history_b)
+        return {
+            "session_a": sid,
+            "session_b": other_id,
+            **report,
+        }
     finally:
         conn.close()
 

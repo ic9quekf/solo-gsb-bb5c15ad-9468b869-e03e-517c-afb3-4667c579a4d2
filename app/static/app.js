@@ -15,6 +15,27 @@ let sandboxOpen = false; // 沙盘弹层是否打开
 let sandboxSaving = false; // 是否有暂存 PUT 在途（丢弃过期响应）
 let sandboxReq = 0; // 沙盘请求序号，丢弃过期响应
 
+/* ---------- 会话对照报告 ---------- */
+
+let compareData = null; // 对照报告服务端数据
+let compareFilter = "all"; // 明细筛选：all / same / winner_reversed / win_to_tie / tie_to_win
+let compareBusy = false;
+
+const COMPARE_TYPE_LABELS = {
+  same: { text: "结果不变", cls: "cmp-same" },
+  winner_reversed: { text: "胜者反转", cls: "cmp-reversed" },
+  win_to_tie: { text: "胜负变平局", cls: "cmp-win-to-tie" },
+  tie_to_win: { text: "平局变胜负", cls: "cmp-tie-to-win" },
+};
+
+const COMPARE_FILTERS = [
+  { key: "all", text: "全部组合" },
+  { key: "winner_reversed", text: "胜者反转" },
+  { key: "win_to_tie", text: "胜负变平局" },
+  { key: "tie_to_win", text: "平局变胜负" },
+  { key: "same", text: "结果不变" },
+];
+
 /* ---------- 工具 ---------- */
 
 function toast(msg) {
@@ -1145,6 +1166,244 @@ async function resumeSandbox() {
   }
 }
 
+function verdictText(winner, a, b) {
+  // 绝对胜者（平局为 null）→ 可读文本
+  if (winner === null) return "平局";
+  return `「${winner}」胜`;
+}
+
+function renderCompareRanking(box, groups, sideCls) {
+  box.innerHTML = "";
+  let rank = 1; // 竞争排名：并列后跳名次
+  for (const group of groups) {
+    const row = document.createElement("div");
+    row.className = "rank-row" + (group.length > 1 ? " tied" : "");
+    const badge = document.createElement("span");
+    badge.className = "rank-badge";
+    badge.textContent = `第 ${rank} 名`;
+    const names = document.createElement("span");
+    names.className = "rank-names";
+    group.forEach((name, i) => {
+      if (i > 0) names.appendChild(document.createTextNode(" ＝ "));
+      const item = document.createElement("span");
+      item.className = "rank-name-item " + sideCls;
+      item.textContent = name;
+      names.appendChild(item);
+    });
+    row.append(badge, names);
+    box.appendChild(row);
+    rank += group.length;
+  }
+}
+
+function renderCompareSummary() {
+  const box = $("#compare-summary");
+  box.innerHTML = "";
+  const s = compareData.summary;
+  const cards = [
+    { key: "total", label: "组合总数", value: s.total, cls: "cmp-total" },
+    { key: "same", label: "结果不变", value: s.same, cls: "cmp-same" },
+    { key: "winner_reversed", label: "胜者反转", value: s.winner_reversed, cls: "cmp-reversed" },
+    { key: "win_to_tie", label: "胜负变平局", value: s.win_to_tie, cls: "cmp-win-to-tie" },
+    { key: "tie_to_win", label: "平局变胜负", value: s.tie_to_win, cls: "cmp-tie-to-win" },
+  ];
+  for (const c of cards) {
+    const el = document.createElement("div");
+    el.className = "cmp-stat " + c.cls;
+    const num = document.createElement("span");
+    num.className = "cmp-stat-num";
+    num.textContent = c.value;
+    const lab = document.createElement("span");
+    lab.className = "cmp-stat-label";
+    lab.textContent = c.label;
+    el.append(num, lab);
+    box.appendChild(el);
+  }
+}
+
+function renderCompareTau() {
+  const box = $("#compare-tau");
+  box.innerHTML = "";
+  const t = compareData.tau_b;
+
+  const head = document.createElement("div");
+  head.className = "cmp-tau-head";
+  const big = document.createElement("span");
+  big.className = "cmp-tau-value";
+  if (t.tau === null) {
+    big.textContent = "τ-b 不适用";
+    big.title = "至少一轮的最终排名为全部候选并列，修正分母为零";
+  } else {
+    big.textContent = `τ-b = ${t.tau.toFixed(3)}`;
+  }
+  head.appendChild(big);
+  box.appendChild(head);
+
+  const note = document.createElement("p");
+  note.className = "muted cmp-tau-note";
+  note.textContent = t.tau === null
+    ? "至少一轮最终排名中全部候选并列（非并列候选对为 0），τ-b 分母为零，按约定返回 null。"
+    : "基于两轮最终 Schulze 排名的全部候选对计算，并列对不计入同序/逆序但进入 τ-b 修正分母。";
+  box.appendChild(note);
+
+  const counts = document.createElement("div");
+  counts.className = "compare-summary cmp-tau-counts";
+  const items = [
+    { label: "同序（一致）", value: t.concordant, cls: "cmp-same" },
+    { label: "逆序（相反）", value: t.discordant, cls: "cmp-reversed" },
+    { label: "仅一侧并列", value: t.tied_one, cls: "cmp-tie" },
+    { label: "双侧并列", value: t.tied_both, cls: "cmp-muted" },
+    { label: "候选对总数", value: t.pairs, cls: "cmp-total" },
+  ];
+  for (const it of items) {
+    const el = document.createElement("div");
+    el.className = "cmp-stat " + it.cls;
+    const num = document.createElement("span");
+    num.className = "cmp-stat-num";
+    num.textContent = it.value;
+    const lab = document.createElement("span");
+    lab.className = "cmp-stat-label";
+    lab.textContent = it.label;
+    el.append(num, lab);
+    counts.appendChild(el);
+  }
+  box.appendChild(counts);
+}
+
+function renderCompareFilters() {
+  const box = $("#compare-filters");
+  box.innerHTML = "";
+  const s = compareData.summary;
+  const countOf = (key) => (key === "all" ? s.total : s[key]);
+  for (const f of COMPARE_FILTERS) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "cmp-filter" + (compareFilter === f.key ? " active" : "");
+    btn.textContent = `${f.text}（${countOf(f.key)}）`;
+    if (f.key !== "all" && f.key !== "same") btn.classList.add("cmp-filter-diff");
+    btn.addEventListener("click", () => {
+      compareFilter = f.key;
+      renderCompareFilters();
+      renderCompareDetails();
+    });
+    box.appendChild(btn);
+  }
+}
+
+function renderCompareDetails() {
+  const tbody = $("#compare-details");
+  tbody.innerHTML = "";
+  const rows = compareData.details.filter(
+    (d) => compareFilter === "all" || d.type === compareFilter
+  );
+  $("#compare-empty").classList.toggle("hidden", rows.length > 0);
+  $("#compare-details-wrap").classList.toggle("hidden", rows.length === 0);
+
+  for (const d of rows) {
+    const meta = COMPARE_TYPE_LABELS[d.type];
+    const tr = document.createElement("tr");
+    tr.className = "cmp-row " + meta.cls;
+
+    const tdType = document.createElement("td");
+    const tag = document.createElement("span");
+    tag.className = "cmp-type-tag " + meta.cls;
+    tag.textContent = meta.text;
+    tdType.appendChild(tag);
+
+    const tdPair = document.createElement("td");
+    tdPair.className = "cmp-pair";
+    tdPair.textContent = `${d.a} ↔ ${d.b}`;
+
+    const tdA = document.createElement("td");
+    tdA.className = "cmp-outcome cmp-side-a";
+    tdA.textContent = verdictText(d.winner_a, d.a, d.b);
+
+    const tdArrow = document.createElement("td");
+    tdArrow.className = "cmp-arrow";
+    tdArrow.textContent = "→";
+
+    const tdB = document.createElement("td");
+    tdB.className = "cmp-outcome cmp-side-b";
+    tdB.textContent = verdictText(d.winner_b, d.a, d.b);
+
+    tr.append(tdType, tdPair, tdA, tdArrow, tdB);
+    tbody.appendChild(tr);
+  }
+}
+
+function showCompareError(msg) {
+  const el = $("#compare-error");
+  el.textContent = msg;
+  el.classList.remove("hidden");
+}
+
+function renderCompareReport() {
+  $("#compare-error").classList.add("hidden");
+  $("#compare-result").classList.remove("hidden");
+  $("#compare-id-a").textContent = compareData.session_a;
+  $("#compare-id-b").textContent = compareData.session_b;
+  renderCompareRanking($("#compare-rank-a"), compareData.ranking_a, "cmp-name-a");
+  renderCompareRanking($("#compare-rank-b"), compareData.ranking_b, "cmp-name-b");
+  renderCompareSummary();
+  renderCompareTau();
+  renderCompareFilters();
+  renderCompareDetails();
+}
+
+async function runComparison() {
+  if (compareBusy || !state) return;
+  const otherId = $("#compare-input").value.trim();
+  if (!otherId) {
+    compareFormError("请先输入另一会话 ID。");
+    return;
+  }
+  if (otherId === state.session_id) {
+    compareFormError("不能与当前会话自身对照，请输入另一个会话 ID。");
+    return;
+  }
+  compareBusy = true;
+  $("#compare-run").disabled = true;
+  try {
+    const data = await api(
+      `/api/sessions/${state.session_id}/comparison?other_id=${encodeURIComponent(otherId)}`
+    );
+    compareData = data;
+    compareFilter = "all";
+    renderCompareReport();
+  } catch (e) {
+    compareData = null;
+    $("#compare-result").classList.add("hidden");
+    showCompareError(e.message);
+  } finally {
+    compareBusy = false;
+    $("#compare-run").disabled = false;
+  }
+}
+
+function compareFormError(msg) {
+  // 表单校验失败：收起旧报告并展示行内错误
+  compareData = null;
+  $("#compare-result").classList.add("hidden");
+  showCompareError(msg);
+}
+
+function openComparison() {
+  if (!state) return;
+  $("#compare-overlay").classList.remove("hidden");
+  $("#compare-current-id").textContent = state.session_id;
+  $("#compare-input").focus();
+  if (compareData) {
+    renderCompareReport();
+  } else {
+    $("#compare-result").classList.add("hidden");
+    $("#compare-error").classList.add("hidden");
+  }
+}
+
+function closeComparison() {
+  $("#compare-overlay").classList.add("hidden");
+}
+
 /* ---------- 数据操作 ---------- */
 
 function stateChanged() {
@@ -1344,6 +1603,19 @@ $("#sandbox-resume-discard").addEventListener("click", async () => {
 $("#sandbox-close").addEventListener("click", closeSandboxOverlay);
 $("#sandbox-discard").addEventListener("click", discardSandboxDraft);
 $("#sandbox-apply").addEventListener("click", applySandboxChanges);
+$("#compare-open-btn").addEventListener("click", openComparison);
+$("#compare-close").addEventListener("click", closeComparison);
+$("#compare-run").addEventListener("click", runComparison);
+$("#compare-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    runComparison();
+  }
+});
+$("#compare-overlay").addEventListener("click", (e) => {
+  // 点击遮罩空白处关闭；点击弹层内部不关闭
+  if (e.target === $("#compare-overlay")) closeComparison();
+});
 $("#sandbox-overlay").addEventListener("click", (e) => {
   // 点击遮罩空白处关闭（草稿保留）；点击弹层内部不关闭
   if (e.target === $("#sandbox-overlay")) closeSandboxOverlay();
@@ -1358,6 +1630,11 @@ document.addEventListener("keydown", (e) => {
   if (sandboxOpen) {
     // 沙盘打开时屏蔽主界面评审快捷键；Esc 关闭弹层（草稿保留）
     if (e.key === "Escape") closeSandboxOverlay();
+    return;
+  }
+  if (!$("#compare-overlay").classList.contains("hidden")) {
+    // 对照报告打开时屏蔽主界面评审快捷键；Esc 关闭弹层
+    if (e.key === "Escape") closeComparison();
     return;
   }
   if (e.ctrlKey && e.key.toLowerCase() === "z") {

@@ -55,6 +55,7 @@
           <button id="reset-btn">🗑 重置本轮</button>
           <button id="new-btn">✚ 新一轮</button>
           <button id="sandbox-open-btn" class="sandbox-entry">🧪 情景沙盘</button>
+          <button id="compare-open-btn" class="compare-entry">📊 会话对照报告</button>
         </div>
       </div>
 
@@ -226,6 +227,81 @@
         <button id="sandbox-discard" class="sandbox-btn-danger">丢弃草稿并退出</button>
         <span class="muted sandbox-save-hint">改动自动暂存到服务器草稿</span>
         <button id="sandbox-apply" class="primary">✓ 一次确认应用全部改动</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 会话对照报告弹层 -->
+  <div id="compare-overlay" class="compare-overlay hidden">
+    <div class="compare-modal">
+      <div class="compare-modal-head">
+        <div>
+          <h2>📊 会话对照报告</h2>
+          <p class="muted compare-subtitle">
+            输入<strong>另一轮评审</strong>的会话 ID：仅当两轮的<strong>启用候选名称集合相同</strong>且
+            <strong>均已完成全部评审</strong>时可对照（候选录入顺序可以不同）。
+            报告为纯只读，<strong>不会修改任一会话</strong>。
+          </p>
+        </div>
+        <button id="compare-close" type="button" title="关闭对照报告">✕</button>
+      </div>
+
+      <div class="compare-form">
+        <label for="compare-input" class="muted">当前会话 ID：<code id="compare-current-id"></code></label>
+        <div class="compare-form-row">
+          <input id="compare-input" type="text" placeholder="输入另一会话 ID（如 a1b2c3d4e5f6）" autocomplete="off">
+          <button id="compare-run" class="primary">生成对照报告</button>
+        </div>
+        <p id="compare-error" class="compare-error hidden"></p>
+      </div>
+
+      <div id="compare-result" class="hidden">
+        <div class="compare-sessions">
+          <div class="compare-session">
+            <p class="compare-session-label">A · 当前会话</p>
+            <p class="compare-session-id"><code id="compare-id-a"></code></p>
+          </div>
+          <div class="compare-vs">⇄</div>
+          <div class="compare-session">
+            <p class="compare-session-label">B · 另一会话</p>
+            <p class="compare-session-id"><code id="compare-id-b"></code></p>
+          </div>
+        </div>
+
+        <div class="compare-rank-grid">
+          <div class="compare-rank-col">
+            <h4>A 轮最终排名</h4>
+            <div id="compare-rank-a"></div>
+          </div>
+          <div class="compare-rank-col">
+            <h4>B 轮最终排名</h4>
+            <div id="compare-rank-b"></div>
+          </div>
+        </div>
+
+        <h4>判断差异汇总</h4>
+        <div id="compare-summary" class="compare-summary"></div>
+
+        <h4>排名一致性 · Kendall τ-b（含并列修正）</h4>
+        <div id="compare-tau" class="compare-tau"></div>
+
+        <h4>差异明细（按组合名称排序）</h4>
+        <div id="compare-filters" class="compare-filters"></div>
+        <div id="compare-details-wrap" class="compare-details-wrap">
+          <table class="compare-table">
+            <thead>
+              <tr>
+                <th>类型</th>
+                <th>组合</th>
+                <th>A · 当前会话</th>
+                <th></th>
+                <th>B · 另一会话</th>
+              </tr>
+            </thead>
+            <tbody id="compare-details"></tbody>
+          </table>
+        </div>
+        <p id="compare-empty" class="empty muted hidden">该筛选下没有组合。</p>
       </div>
     </div>
   </div>
