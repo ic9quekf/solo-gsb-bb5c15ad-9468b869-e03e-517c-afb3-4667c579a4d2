@@ -1145,6 +1145,256 @@ async function resumeSandbox() {
   }
 }
 
+/* ---------- 会话对照报告 ---------- */
+
+let compareData = null; // 最近一次对照报告结果
+let compareFilter = "all"; // 明细筛选：all / winner_reversed / win_to_tie / tie_to_win / same
+
+const COMPARE_FILTERS = [
+  { key: "all", label: "全部" },
+  { key: "winner_reversed", label: "胜者反转" },
+  { key: "win_to_tie", label: "胜负变平局" },
+  { key: "tie_to_win", label: "平局变胜负" },
+  { key: "same", label: "结果不变" },
+];
+const COMPARE_TYPE_LABELS = {
+  same: "结果不变",
+  winner_reversed: "胜者反转",
+  win_to_tie: "胜负变平局",
+  tie_to_win: "平局变胜负",
+};
+
+function shortSid(id) {
+  return id ? id.slice(0, 8) : "";
+}
+
+function openComparison() {
+  if (!state) return;
+  compareData = null;
+  compareFilter = "all";
+  $("#compare-overlay").classList.remove("hidden");
+  $("#compare-sid-a").value = state.session_id;
+  const inputB = $("#compare-sid-b");
+  inputB.value = "";
+  $("#compare-error").classList.add("hidden");
+  $("#compare-error").textContent = "";
+  $("#compare-result").classList.add("hidden");
+  $("#compare-hint").classList.remove("hidden");
+  setTimeout(() => inputB.focus(), 0);
+}
+
+function closeComparison() {
+  $("#compare-overlay").classList.add("hidden");
+}
+
+async function runComparison() {
+  if (!state) return;
+  const other = $("#compare-sid-b").value.trim();
+  const errBox = $("#compare-error");
+  if (!other) {
+    errBox.textContent = "请输入另一会话 ID";
+    errBox.classList.remove("hidden");
+    return;
+  }
+  $("#compare-run-btn").disabled = true;
+  try {
+    const data = await api(
+      `/api/sessions/${state.session_id}/comparison?other_session_id=${encodeURIComponent(other)}`
+    );
+    compareData = data;
+    compareFilter = "all";
+    errBox.classList.add("hidden");
+    errBox.textContent = "";
+    $("#compare-hint").classList.add("hidden");
+    $("#compare-result").classList.remove("hidden");
+    renderComparison();
+  } catch (e) {
+    compareData = null;
+    $("#compare-result").classList.add("hidden");
+    errBox.textContent = e.message;
+    errBox.classList.remove("hidden");
+  } finally {
+    $("#compare-run-btn").disabled = false;
+  }
+}
+
+function outcomeText(detail, side) {
+  // side: "a" 或 "b"；返回该轮此组合的人类可读结果
+  const result = side === "a" ? detail.result_a : detail.result_b;
+  const winner = side === "a" ? detail.winner_a : detail.winner_b;
+  if (result === "tie") return { text: "平局", cls: "outcome-tie" };
+  const loser = winner === detail.a ? detail.b : detail.a;
+  return { text: `${winner} 胜 ${loser}`, cls: "outcome-win" };
+}
+
+function renderComparisonRanking(box, session) {
+  box.innerHTML = "";
+  // 与主页面相同的排名展示（含并列组徽标），这里名称不可点
+  renderRankingInto(box, session.ranking, false);
+  const idLine = document.createElement("p");
+  idLine.className = "muted compare-sid-line";
+  idLine.textContent = `会话 ID：${session.id}`;
+  idLine.title = session.id;
+  box.appendChild(idLine);
+}
+
+function compareCountFor(key) {
+  const s = compareData.summary;
+  if (key === "all") return s.total_pairs;
+  return s[key];
+}
+
+function renderComparisonSummary() {
+  const box = $("#compare-summary");
+  box.innerHTML = "";
+  const s = compareData.summary;
+  const items = [
+    { key: "same", cls: "stat-same", num: s.same, label: "结果不变" },
+    { key: "winner_reversed", cls: "stat-reversed", num: s.winner_reversed, label: "胜者反转" },
+    { key: "win_to_tie", cls: "stat-win-tie", num: s.win_to_tie, label: "胜负变平局" },
+    { key: "tie_to_win", cls: "stat-tie-win", num: s.tie_to_win, label: "平局变胜负" },
+    { key: "different", cls: "stat-different", num: s.different, label: `差异合计（共 ${s.total_pairs} 对）` },
+  ];
+  for (const it of items) {
+    const cell = document.createElement("div");
+    cell.className = `compare-stat ${it.cls}`;
+    const num = document.createElement("span");
+    num.className = "compare-stat-num";
+    num.textContent = it.num;
+    const lab = document.createElement("span");
+    lab.className = "compare-stat-label";
+    lab.textContent = it.label;
+    cell.append(num, lab);
+    box.appendChild(cell);
+  }
+}
+
+function renderComparisonTauB() {
+  const box = $("#compare-taub");
+  box.innerHTML = "";
+  const t = compareData.kendall_tau_b;
+
+  const valueLine = document.createElement("div");
+  if (t.value === null) {
+    valueLine.className = "compare-taub-value taub-null";
+    valueLine.textContent = "τ-b = null（分母为 0，至少一侧排名全部并列）";
+  } else {
+    valueLine.className = "compare-taub-value";
+    valueLine.textContent = `τ-b = ${t.value.toFixed(4)}`;
+  }
+  box.appendChild(valueLine);
+
+  const note = document.createElement("p");
+  note.className = "compare-taub-note";
+  note.textContent =
+    "τ-b =（同序 − 逆序）/ √((同序 + 逆序 + 仅A并列)(同序 + 逆序 + 仅B并列))；" +
+    "两侧均并列的候选对不计入。取值范围 −1（完全逆序）～ 1（完全一致）。";
+  box.appendChild(note);
+
+  const counts = document.createElement("div");
+  counts.className = "compare-taub-counts";
+  const mkCount = (cls, text) => {
+    const span = document.createElement("span");
+    span.className = cls;
+    span.textContent = text;
+    counts.appendChild(span);
+  };
+  mkCount("tc-concordant", `同序 ${t.concordant}`);
+  mkCount("tc-discordant", `逆序 ${t.discordant}`);
+  mkCount("tc-tiedone", `仅一侧并列 ${t.tied_one_side}`);
+  mkCount("", `（仅 A 并列 ${t.tied_in_a_only} · 仅 B 并列 ${t.tied_in_b_only}）`);
+  mkCount("tc-tiedboth", `两侧均并列 ${t.tied_both}`);
+  mkCount("", `候选对总数 ${t.total_pairs}`);
+  box.appendChild(counts);
+}
+
+function renderComparisonFilters() {
+  const box = $("#compare-filters");
+  box.innerHTML = "";
+  for (const f of COMPARE_FILTERS) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className =
+      "compare-filter-btn" + (compareFilter === f.key ? " active" : "");
+    btn.textContent = `${f.label}（${compareCountFor(f.key)}）`;
+    btn.addEventListener("click", () => {
+      compareFilter = f.key;
+      renderComparisonFilters();
+      renderComparisonDetails();
+    });
+    box.appendChild(btn);
+  }
+}
+
+function renderComparisonDetails() {
+  const body = $("#compare-details-body");
+  body.innerHTML = "";
+  const rows = compareData.details.filter(
+    (d) => compareFilter === "all" || d.type === compareFilter
+  );
+  for (const d of rows) {
+    const tr = document.createElement("tr");
+
+    const tdType = document.createElement("td");
+    const badge = document.createElement("span");
+    badge.className = `compare-type-badge cmp-${d.type}`;
+    badge.textContent = COMPARE_TYPE_LABELS[d.type];
+    tdType.appendChild(badge);
+
+    const tdPair = document.createElement("td");
+    tdPair.className = "compare-pair";
+    tdPair.textContent = `${d.a} ↔ ${d.b}`;
+
+    const oa = outcomeText(d, "a");
+    const ob = outcomeText(d, "b");
+    const tdA = document.createElement("td");
+    tdA.className = `compare-outcome ${oa.cls}`;
+    tdA.textContent = oa.text;
+    const tdArrow = document.createElement("td");
+    tdArrow.className = "compare-arrow";
+    tdArrow.textContent = "→";
+    const tdB = document.createElement("td");
+    tdB.className = `compare-outcome ${ob.cls}`;
+    tdB.textContent = ob.text;
+
+    tr.append(tdType, tdPair, tdA, tdArrow, tdB);
+    body.appendChild(tr);
+  }
+  $("#compare-empty").classList.toggle("hidden", rows.length > 0);
+}
+
+function renderComparison() {
+  if (!compareData) return;
+  $("#compare-rank-title-a").textContent =
+    `会话 A（${shortSid(compareData.session_a.id)}…）最终排名`;
+  $("#compare-rank-title-b").textContent =
+    `会话 B（${shortSid(compareData.session_b.id)}…）最终排名`;
+  renderComparisonRanking($("#compare-rank-a"), compareData.session_a);
+  renderComparisonRanking($("#compare-rank-b"), compareData.session_b);
+  renderComparisonSummary();
+  renderComparisonTauB();
+  renderComparisonFilters();
+  renderComparisonDetails();
+}
+
+async function copyCurrentSessionId() {
+  const sid = $("#compare-sid-a").value;
+  try {
+    await navigator.clipboard.writeText(sid);
+    toast("当前会话 ID 已复制");
+  } catch (_) {
+    // 非安全上下文（如 http 内网地址）下的兜底
+    const input = $("#compare-sid-a");
+    input.select();
+    try {
+      document.execCommand("copy");
+      toast("当前会话 ID 已复制");
+    } catch (__) {
+      toast(`复制失败，请手动选择：${sid}`);
+    }
+  }
+}
+
 /* ---------- 数据操作 ---------- */
 
 function stateChanged() {
@@ -1329,6 +1579,20 @@ $("#suggestion-apply").addEventListener("click", applySuggestion);
 $("#nextpair-jump").addEventListener("click", jumpToRecommended);
 $("#basis-close").addEventListener("click", clearBasis);
 $("#sandbox-open-btn").addEventListener("click", openSandbox);
+$("#compare-open-btn").addEventListener("click", openComparison);
+$("#compare-close").addEventListener("click", closeComparison);
+$("#compare-run-btn").addEventListener("click", runComparison);
+$("#compare-copy-a").addEventListener("click", copyCurrentSessionId);
+$("#compare-sid-b").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    runComparison();
+  }
+});
+$("#compare-overlay").addEventListener("click", (e) => {
+  // 点击遮罩空白处关闭；点击弹层内部不关闭
+  if (e.target === $("#compare-overlay")) closeComparison();
+});
 $("#sandbox-resume-btn").addEventListener("click", resumeSandbox);
 $("#sandbox-resume-discard").addEventListener("click", async () => {
   if (!confirm("确定丢弃沙盘草稿吗？评审记录不会受到影响。")) return;
@@ -1355,6 +1619,11 @@ $("#jump-back").addEventListener("click", () => {
 
 document.addEventListener("keydown", (e) => {
   if ($("#review-view").classList.contains("hidden")) return;
+  if (!$("#compare-overlay").classList.contains("hidden")) {
+    // 对照报告打开时屏蔽主界面评审快捷键；Esc 关闭弹层（纯只读，无副作用）
+    if (e.key === "Escape") closeComparison();
+    return;
+  }
   if (sandboxOpen) {
     // 沙盘打开时屏蔽主界面评审快捷键；Esc 关闭弹层（草稿保留）
     if (e.key === "Escape") closeSandboxOverlay();

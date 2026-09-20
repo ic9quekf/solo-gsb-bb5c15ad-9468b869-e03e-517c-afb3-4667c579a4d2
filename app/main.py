@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .compare import build_comparison, is_complete, normalized_verdicts
 from .conflict import minimum_tie_resolution, shortest_cycle
 from .paths import pair_explanation
 from .priority import recommend_next_pair
@@ -870,6 +871,81 @@ def apply_sandbox(sid: str, payload: SandboxApply | None = None):
                     )
             conn.execute("DELETE FROM sandboxes WHERE session_id = ?", (sid,))
             return load_state(conn, sid)
+    finally:
+        conn.close()
+
+
+# ---------- 会话对照报告 ----------
+
+def _comparison_inputs(
+    conn: sqlite3.Connection, sid: str
+) -> tuple[list[str], list[dict]]:
+    """读取一个会话的启用候选（录入序）与仅含启用候选的判断记录。
+
+    会话不存在时抛出 404（与其他接口一致）。
+    """
+    all_candidates, disabled_set, _ = _load_rows(conn, sid)
+    candidates = [name for name in all_candidates if name not in disabled_set]
+    enabled = set(candidates)
+    history = [
+        {"a": r["a"], "b": r["b"], "result": r["result"]}
+        for r in conn.execute(
+            "SELECT a, b, result FROM judgments WHERE session_id = ? ORDER BY id",
+            (sid,),
+        )
+        if r["a"] in enabled and r["b"] in enabled
+    ]
+    return candidates, history
+
+
+@app.get("/api/sessions/{sid}/comparison")
+def compare_sessions(sid: str, other_session_id: str | None = None):
+    """会话对照报告：把当前会话与另一会话的**已完成两轮评审**逐条对照。
+
+    纯只读：只执行 SELECT，绝不写入或修改任一会话的任何数据。
+    前提校验（不满足时返回 409）：
+    - 必须提供另一会话 ID，且不能是当前会话自身；
+    - 两会话的**启用候选名称集合完全相同**（录入顺序可以不同）；
+    - 两轮评审均已完成（启用候选之间每个组合都已有判断）。
+
+    每条判断归一化为「按名称排序的无向组合 + 绝对胜者」后对齐，
+    分类统计结果不变 / 胜者反转 / 胜负变平局 / 平局变胜负，
+    并基于两轮最终排名计算含并列修正的 Kendall τ-b（分母为 0 时
+    ``kendall_tau_b.value`` 为 null）。
+    """
+    other = (other_session_id or "").strip()
+    if not other:
+        raise HTTPException(422, "请输入另一会话 ID")
+    if other == sid:
+        raise HTTPException(422, "另一会话 ID 不能与当前会话相同")
+
+    conn = get_conn()
+    try:
+        if conn.execute("SELECT 1 FROM sessions WHERE id = ?", (other,)).fetchone() is None:
+            raise HTTPException(404, "另一会话不存在或已被删除")
+
+        candidates_a, history_a = _comparison_inputs(conn, sid)
+        candidates_b, history_b = _comparison_inputs(conn, other)
+
+        set_a, set_b = set(candidates_a), set(candidates_b)
+        if set_a != set_b:
+            only_a = sorted(set_a - set_b)
+            only_b = sorted(set_b - set_a)
+            detail_parts = ["两会话的启用候选名称集合不一致，无法对照（停用候选不参与对照）"]
+            if only_a:
+                detail_parts.append(f"仅当前会话启用：{ '、'.join(only_a) }")
+            if only_b:
+                detail_parts.append(f"仅另一会话启用：{ '、'.join(only_b) }")
+            raise HTTPException(409, "；".join(detail_parts))
+
+        if not is_complete(candidates_a, normalized_verdicts(history_a)):
+            raise HTTPException(409, "当前会话尚未完成全部启用候选对的评审，无法对照")
+        if not is_complete(candidates_b, normalized_verdicts(history_b)):
+            raise HTTPException(409, "另一会话尚未完成全部启用候选对的评审，无法对照")
+
+        return build_comparison(
+            sid, candidates_a, history_a, other, candidates_b, history_b
+        )
     finally:
         conn.close()
 
